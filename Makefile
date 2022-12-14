@@ -8,7 +8,7 @@ OBJDIR := build
 RELDIR := release
 
 INCDIR := include
-SRCDIR := . fourier libspectrice
+SRCDIR := . fourier libspectrice tools
 
 #----------------------------#
 # Cross-compilation, compile flags
