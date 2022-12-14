@@ -99,7 +99,7 @@ static int InitXformWindow(float *w, int N, int nHops, int Type) {
 
 /**************************************/
 
-int Spectrice_Init(struct Spectrice_t *State, int WindowType) {
+int Spectrice_Init(struct Spectrice_t *State, int WindowType, const float *PrimingInput) {
 	int n;
 
 	//! Clear anything that is needed for EncoderState_Destroy()
@@ -148,14 +148,17 @@ int Spectrice_Init(struct Spectrice_t *State, int WindowType) {
 		Spectrice_Destroy(State);
 		return 0;
 	}
-	for(n=0;n<(BlockSize  )*nChan;n++) State->BfInvLap[n] = 0.0f;
-	for(n=0;n<(BlockSize  )*nChan;n++) State->BfFwdLap[n] = 0.0f;
 	for(n=0;n<(BlockSize/2)*nChan;n++) State->BfAbs   [n] = 0.0f;
 	if(State->FreezePhase) {
 		for(n=0;n<(BlockSize/2)*nChan;n++) State->BfArg    [n] = 0.0f;
 		for(n=0;n<(BlockSize/2)*nChan;n++) State->BfArgOld [n] = 0.0f;
 		for(n=0;n<(BlockSize/2)*nChan;n++) State->BfArgStep[n] = 0.0f;
 	}
+
+	//! Prime input buffer
+	for(n=0;n<BlockSize*nChan;n++) State->BfFwdLap[n] = 0.0f;
+	for(n=0;n<BlockSize*nChan;n++) State->BfInvLap[n] = 0.0f;
+	if(PrimingInput) Spectrice_Process(State, NULL, PrimingInput);
 
 	//! Success
 	return 1;

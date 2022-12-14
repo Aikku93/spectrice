@@ -53,7 +53,7 @@ struct Spectrice_t {
 
 /**************************************/
 
-int  Spectrice_Init   (struct Spectrice_t *State, int WindowType);
+int  Spectrice_Init   (struct Spectrice_t *State, int WindowType, const float *PrimingInput);
 void Spectrice_Destroy(struct Spectrice_t *State);
 void Spectrice_Process(struct Spectrice_t *State, float *Output, const float *Input);
 
