@@ -100,13 +100,15 @@ void Spectrice_Process(struct Spectrice_t *State, float *Output, const float *In
 			}
 
 			//! Shift samples into/out of buffers
-			for(n=0;n<HopSize;n++) *Output++ = BfInvLap[n];
+			if(Output) {
+				for(n=0;n<HopSize;n++) Output[(Hop*HopSize+n)*nChan+Chan] = BfInvLap[n];
+			}
 			for(n=HopSize;n<BlockSize;n++) {
 				BfFwdLap[n-HopSize] = BfFwdLap[n];
 				BfInvLap[n-HopSize] = BfInvLap[n];
 			}
 			for(n=0;n<HopSize;n++) {
-				BfFwdLap[BlockSize-HopSize+n] = *Input++;
+				BfFwdLap[BlockSize-HopSize+n] = Input[(Hop*HopSize+n)*nChan+Chan];
 				BfInvLap[BlockSize-HopSize+n] = 0.0f;
 			}
 		}
