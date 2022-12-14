@@ -10,20 +10,17 @@ No libraries are required, only a compiler. The Makefile might need adjusting, h
 After adjusting the Makefile as needed, run ```make all``` to build the tool.
 
 ## Usage
-For the time being, both encoding and decoding tools operate on raw 16-bit audio (with interleaved channels).
-
-Support for WAV files is planned, but not yet implemented.
+Spectrice uses WAV files for input/output, in 8-bit PCM, 16-bit PCM, 24-bit PCM, or 32-bit IEEE floating-point formats.
 
 The processing library itself works on 32-bit floating-point blocks of data, however, and can be used standalone.
 
 ### Processing
-```spectrice Input.raw Output.raw [Options]```
+```spectrice Input.wav Output.wav [Options]```
 
 Options:
 
 | Option            | Effect                                                                               |
 | ----------------- | ------------------------------------------------------------------------------------ |
-| `-nc:X`           | Set number of channels in input. (Default: 1)                                        |
 | `-blocksize:X`    | Set transform block size. (Default: 8192, Minimum: 16, Maximum: 65536)               |
 | `-nhops:X`        | Set number of hops per transform block. (Default: 8. Minimum depends on window type) |
 | `-window:X`       | Set analysis+synthesis window function.                                              |
@@ -33,6 +30,7 @@ Options:
 | `-freezefactor:X` | Set strength of freezing effect. (Default: 1.0)                                      |
 | `-nofreezeamp`    | Do not freeze amplitude (useless by itself; combine with `freezephase`.              |
 | `-freezephase`    | Freeze the phase step.                                                               |
+| `-format:default` | Set the output file format (`PCM8`, `PCM16`, `PCM24`, `FLOAT32`, or `default`).      |
 
 ## Possible issues
 * Due to limitations in STFT re-synthesis, loops might 'pop' at the boundaries. Increasing the number of hops, or moving the loop to a zero-crossing after freezing might help.
@@ -51,7 +49,7 @@ Options:
 
 ## Future plans
 
-* Add WAV file support.
+* ~~Add WAV file support.~~ Added 2022/12/14
 * Add support for freezing only a specified loop section, with correct handling of wrapping behaviour.
 
 ## Authors
