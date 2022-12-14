@@ -10,155 +10,33 @@
 #include <string.h>
 /**************************************/
 #include "Spectrice.h"
-/**************************************/
-#define BUFFER_ALIGNMENT 64u //! Always align memory to 64-byte boundaries (preparation for AVX-512)
-/**************************************/
-#define BUFFER_SIZE_INPUT  65536 //! In samples per channel
-#define BUFFER_SIZE_OUTPUT 65536 //! In samples per channel
+#include "MiniRIFF.h"
+#include "WavIO.h"
 /**************************************/
 
-struct SampleBuffer_State_t {
-	FILE  *File;
-	float *Buf;
-	char  *RawBuf;
-	int    BufIdx;
-	int    BufLen;
-};
-
-/**************************************/
-
-#define SAMPLEBUFFER_RD 0
-#define SAMPLEBUFFER_WR 1
-int SampleBuffer_Init(struct SampleBuffer_State_t *State, int BufLen, int PrePad, const char *Filename, int FileMode) {
-	static const char *FileModes[] = {"rb","wb"};
-	State->File = fopen(Filename, FileModes[FileMode]);
-	if(!State->File) return 0;
-	char *Buf = malloc(BufLen*sizeof(float) + BUFFER_ALIGNMENT-1);
-	if(!Buf) { fclose(State->File); return 0; }
-
-	State->Buf    = (float*)(Buf + (-(uintptr_t)Buf % BUFFER_ALIGNMENT));
-	State->RawBuf = Buf;
-	State->BufIdx = (FileMode == SAMPLEBUFFER_RD) ? (BufLen - PrePad) : PrePad;
-	State->BufLen = BufLen;
-	return 1;
-}
-
-void SampleBuffer_Destroy(struct SampleBuffer_State_t *State) {
-	free(State->RawBuf);
-	fclose(State->File);
-}
-
-void SampleBuffer_Deinterleave(float *Buf, float *Temp, int N) {
-	int n;
-	for(n=0;n<N/2;n++) {
-		Temp[n] = Buf[n*2+1];
-		Buf[n]  = Buf[n*2+0];
-	}
-	for(n=0;n<N/2;n++) {
-		Buf[N/2+n] = Temp[n];
-	}
-}
-
-void SampleBuffer_Interleave(float *Buf, float *Temp, int N) {
-	int n;
-	for(n=N/2-1;n>=0;n--) {
-		Temp[n] = Buf[N/2+n];
-	}
-	for(n=N/2-1;n>=0;n--) {
-		Buf[n*2+1] = Temp[n];
-		Buf[n*2+0] = Buf[n];
-	}
-}
-
-//! NOTE: nSamples must be <= BufLen
-//! NOTE: Returned data at Ret[0..nSamples-1] will be discarded
-//! in future calls and may be safely destroyed after this call.
-float *SampleBuffer_Fetch(struct SampleBuffer_State_t *State, int nSamples) {
-	int n, BufIdx = State->BufIdx, BufLen = State->BufLen;
-	float *Buf = State->Buf;
-
-	//! Need to refill for this request?
-	if(BufIdx+nSamples > BufLen) {
-		int SmpToRead = BufIdx;
-
-		//! Shift samples from end to start
-		const float *Src = Buf + BufIdx;
-		for(n=0;n<BufLen-SmpToRead;n++) Buf[n] = Src[n];
-
-		//! Read samples
-		//! NOTE: Aliasing, so the source data is pushed to the end
-		//! of the buffer prior to unpacking/widening to 32bit.
-		int16_t *Buf16 = (int16_t*)(Buf + BufLen) - SmpToRead;
-		int SmpRead = fread(Buf16, sizeof(int16_t), SmpToRead, State->File);
-		for(n=SmpRead;n<SmpToRead;n++) Buf16[n] = 0.0f; //! Zero-pad on EOF
-
-		//! Unpack to float
-		float *BufDst = Buf + BufLen - SmpToRead;
-		for(n=0;n<SmpToRead;n++) BufDst[n] = (float)Buf16[n];
-		BufIdx = 0;
-	}
-
-	//! Update samples-remaining count and return pointer to data
-	State->BufIdx = BufIdx + nSamples;
-	return State->Buf + BufIdx;
-}
-
-static void SampleBuffer_WriteFlush(struct SampleBuffer_State_t *State) {
-	int n, BufIdx = State->BufIdx;
-	float *Buf = State->Buf;
-	int SmpToWrite = BufIdx; if(!SmpToWrite) return;
-	int16_t *Buf16 = (int16_t*)Buf;
-	for(n=0;n<SmpToWrite;n++) {
-		int v = lrintf(Buf[n]);
-		if(v < -32768) v = -32768;
-		if(v > +32767) v = +32767;
-		Buf16[n] = (int16_t)v;
-	}
-	fwrite(Buf16, sizeof(int16_t), SmpToWrite, State->File);
-	State->BufIdx = 0;
-}
-void SampleBuffer_Write(struct SampleBuffer_State_t *State, int nSamples, const float *Src) {
-	int n, BufIdx = State->BufIdx, BufLen = State->BufLen;
-	float *Buf = State->Buf;
-
-	//! Still have samples to skip?
-	if(BufIdx < 0) {
-		int N = -BufIdx; if(N > nSamples) N = nSamples;
-		nSamples -= N;
-		Src      += N;
-		BufIdx   += N;
-	}
-
-	//! Keep cycling samples through buffer
-	while(nSamples) {
-		//! Buffer is full?
-		if(BufIdx == BufLen) {
-			State->BufIdx = BufIdx;
-			SampleBuffer_WriteFlush(State);
-			BufIdx = /*State->BufIdx*/0;
-		}
-
-		//! Fill the buffer as much as we can
-		int N = BufLen - BufIdx; if(N > nSamples) N = nSamples;
-		float *Dst = Buf + BufIdx;
-		for(n=0;n<N;n++) *Dst++ = *Src++;
-		BufIdx   += N;
-		nSamples -= N;
-	}
-	State->BufIdx = BufIdx;
-}
+//! Possible output formats
+#define FORMAT_PCM8    0
+#define FORMAT_PCM16   1
+#define FORMAT_PCM24   2
+#define FORMAT_FLOAT32 3
+#define FORMAT_DEFAULT 4
 
 /**************************************/
 
 int main(int argc, const char *argv[]) {
+	int   ExitCode = 0;
+	char *AllocBuffer;
+	struct WAV_State_t FileIn;
+	struct WAV_State_t FileOut;
+	struct Spectrice_t State;
+
 	//! Check arguments
 	if(argc < 4) {
 		printf(
 			"spectrice - Spectral Freezing Tool\n"
 			"Usage:\n"
-			" spectrice Input Output [Opt]\n"
+			" spectrice Input.wav Output.wav [Opt]\n"
 			"Options:\n"
-			" -nc:1           - Set number of channels.\n"
 			" -blocksize:8192 - Set number of coefficients per block (must be a power of 2).\n"
 			" -nhops:8        - Set number of evenly-divided hops per block (must be 2^n).\n"
 			" -window:nuttall - Set the window function. Possible values:\n"
@@ -175,13 +53,13 @@ int main(int argc, const char *argv[]) {
 			" -freezefactor:1.0 - Amount of freezing to apply. 0.0 = No change, 1.0 = Freeze.\n"
 			" -nofreezeamp      - Don't freeze amplitude.\n"
 			" -freezephase      - Freeze phase step.\n"
-			"Multi-channel data must be interleaved (packed).\n"
+			" -format:default   - Set output format (default, PCM8, PCM16, PCM24, FLOAT32).\n"
+			"                     `default` will use the same format as the input file.\n"
 		);
 		return 1;
 	}
 
 	//! Parse parameters
-	int   nChan        = 1;
 	int   BlockSize    = 8192;
 	int   nHops        = 8;
 	int   FreezeAmp    = 1;
@@ -190,16 +68,11 @@ int main(int argc, const char *argv[]) {
 	int   FreezeXFade  = 0;
 	int   FreezePoint  = 0;
 	float FreezeFactor = 1.0f;
+	int   FormatType   = FORMAT_DEFAULT;
 	{
 		int n;
 		for(n=3;n<argc;n++) {
-			if(!memcmp(argv[n], "-nc:", 4)) {
-				int x = atoi(argv[n] + 4);
-				if(x > 0 && x <= 2) nChan = x;
-				else printf("WARNING: Ignoring invalid parameter to number of channels (%d)\n", x);
-			}
-
-			else if(!memcmp(argv[n], "-blocksize:", 11)) {
+			if(!memcmp(argv[n], "-blocksize:", 11)) {
 				int x = atoi(argv[n] + 11);
 				if(x >= 16 && x <= 65536 && (x & (-x)) == x) BlockSize = x;
 				else printf("WARNING: Ignoring invalid parameter to block size (%d)\n", x);
@@ -247,96 +120,171 @@ int main(int argc, const char *argv[]) {
 				FreezePhase = 1;
 			}
 
+			else if(!memcmp(argv[n], "-format:", 8)) {
+				const char *FmtStr = argv[n] + 8;
+				     if(!strcmp(FmtStr, "PCM8")    || !strcmp(FmtStr, "pcm8"))
+					FormatType = FORMAT_PCM8;
+				else if(!strcmp(FmtStr, "PCM16")   || !strcmp(FmtStr, "pcm16"))
+					FormatType = FORMAT_PCM16;
+				else if(!strcmp(FmtStr, "PCM24")   || !strcmp(FmtStr, "pcm24"))
+					FormatType = FORMAT_PCM24;
+				else if(!strcmp(FmtStr, "FLOAT32") || !strcmp(FmtStr, "float32"))
+					FormatType = FORMAT_FLOAT32;
+				else if(!strcmp(FmtStr, "DEFAULT") || !strcmp(FmtStr, "default"))
+					FormatType = FORMAT_DEFAULT;
+				else {
+					printf("ERROR: Invalid output format (%s).\n", FmtStr);
+					ExitCode = -1; goto Exit_BadArgs;
+				}
+			}
+
 			else printf("WARNING: Ignoring unknown argument (%s)\n", argv[n]);
 		}
 	}
 	int FreezeStart = FreezePoint - FreezeXFade;
 
-	//! Create IO streams
-	int InputPrePad  = BlockSize - (FreezePoint % BlockSize);
-	int OutputPrePad = -(BlockSize + InputPrePad); //! iSTFT delay, plus input pre-padding
-	struct SampleBuffer_State_t InFile, OutFile; {
-		if(!SampleBuffer_Init(&InFile, BUFFER_SIZE_INPUT*nChan, InputPrePad*nChan, argv[1], SAMPLEBUFFER_RD)) {
-			printf("ERROR: Unable to open input file (%s)\n", argv[1]);
-			return -1;
+	//! Verify that FreezeStart occurs after at least one block of data
+	if(FreezeStart < BlockSize) {
+		printf("WARNING: Freeze start point too early; moving to %d.\n", BlockSize);
+		FreezeStart = BlockSize;
+		if(FreezePoint < FreezeStart) FreezePoint = FreezeStart;
+	}
+
+	//! Open input file
+	{
+		int Error = WAV_OpenR(&FileIn, argv[1]);
+		if(Error < 0) {
+			printf("ERROR: Unable to open input file (%s); error %s.\n", argv[1], WAV_ErrorCodeToString(Error));
+			ExitCode = -1; goto Exit_FailOpenInFile;
 		}
-		if(!SampleBuffer_Init(&OutFile, BUFFER_SIZE_OUTPUT*nChan, OutputPrePad*nChan, argv[2], SAMPLEBUFFER_WR)) {
-			printf("ERROR: Unable to open output file (%s)\n", argv[2]);
-			SampleBuffer_Destroy(&InFile);
-			return -1;
+	}
+
+	//! Create output file
+	{
+		struct WAVE_fmt_t fmt, *fmtSrc = FileIn.fmt;
+		if(FormatType == FORMAT_DEFAULT) {
+			memcpy(&fmt, fmtSrc, sizeof(fmt));
+		} else {
+			int BytesPerSmp = 0;
+			switch(FormatType) {
+				case FORMAT_PCM8:    BytesPerSmp =  8 / 8; break;
+				case FORMAT_PCM16:   BytesPerSmp = 16 / 8; break;
+				case FORMAT_PCM24:   BytesPerSmp = 24 / 8; break;
+				case FORMAT_FLOAT32: BytesPerSmp = 32 / 8; break;
+			}
+			fmt.wFormatTag      = (FormatType == FORMAT_FLOAT32) ? WAVE_FORMAT_IEEE_FLOAT : WAVE_FORMAT_PCM;
+			fmt.nChannels       = fmtSrc->nChannels;
+			fmt.nSamplesPerSec  = fmtSrc->nSamplesPerSec;
+			fmt.nAvgBytesPerSec = BytesPerSmp * fmtSrc->nChannels * fmtSrc->nSamplesPerSec;
+			fmt.nBlockAlign     = BytesPerSmp * fmtSrc->nChannels;
+			fmt.wBitsPerSample  = BytesPerSmp * 8;
+		}
+		int Error = WAV_OpenW(&FileOut, argv[2], &fmt);
+		if(Error < 0) {
+			printf("ERROR: Unable to create output file (%s); error %s.\n", argv[1], WAV_ErrorCodeToString(Error));
+			ExitCode = -1; goto Exit_FailCreateOutFile;
+		}
+
+		//! Copy all chunks from source file
+		const struct WAV_Chunk_t *SrcCk = FileIn.Chunks;
+		      struct WAV_Chunk_t *Prev  = NULL;
+		while(SrcCk) {
+			//! Ensure to exclude fmt and data
+			if(SrcCk->CkType != RIFF_FOURCC("fmt ") && SrcCk->CkType != RIFF_FOURCC("data")) {
+				//! Allocate memory for chunk header and data
+				struct WAV_Chunk_t *DstCk = malloc(sizeof(struct WAV_Chunk_t) + SrcCk->CkSize);
+				if(DstCk) {
+					//! Fille out new chunk and read from source file
+					DstCk->CkType = SrcCk->CkType;
+					DstCk->CkSize = SrcCk->CkSize;
+					DstCk->Prev   = Prev;
+					DstCk->Next   = NULL;
+					if(Prev) Prev->Next     = DstCk;
+					else     FileOut.Chunks = DstCk;
+					fseek(FileIn.File, SrcCk->FileOffs, SEEK_SET);
+					fread(DstCk+1, SrcCk->CkSize, 1, FileIn.File);
+					Prev = DstCk;
+				}
+			}
+			SrcCk = SrcCk->Next;
 		}
 	}
 
-	//! Create processing buffer
-	float *ProcessBuffer = malloc(BlockSize * nChan * sizeof(float));
-	if(!ProcessBuffer) {
-		printf("ERROR: Out of memory\n");
-		SampleBuffer_Destroy(&OutFile);
-		SampleBuffer_Destroy(&InFile);
-		return -1;
+	//! Allocate reading buffer
+	AllocBuffer = malloc(2 * sizeof(float)*BlockSize*FileIn.fmt->nChannels);
+	if(!AllocBuffer) {
+		printf("ERROR: Couldn't allocate reading buffer.\n");
+		ExitCode = -1; goto Exit_FailCreateAllocBuffer;
+	}
+	float *ReadBuffer = (float*)AllocBuffer;
+	float *OutBuffer  = ReadBuffer + BlockSize*FileIn.fmt->nChannels;
+
+	//! Because the freeze start point might not be block-aligned, we copy
+	//! samples directly until one block before the freeze start point; we
+	//! then use this block to prime the processor.
+	{
+		int nSmpRem = FreezeStart - BlockSize;
+		while(nSmpRem) {
+			int N = nSmpRem;
+			if(N > BlockSize) N = BlockSize;
+			nSmpRem -= N;
+			WAV_ReadAsFloat(&FileIn, ReadBuffer, N);
+			WAV_WriteFromFloat(&FileOut, ReadBuffer, N);
+		}
+		WAV_ReadAsFloat(&FileIn, ReadBuffer, BlockSize);
 	}
 
-	//! Create [de]interleaving buffer
-	float *InterleaveBuffer = malloc(BlockSize * sizeof(float));
-	if(!InterleaveBuffer) {
-		printf("ERROR: Out of memory\n");
-		free(ProcessBuffer);
-		SampleBuffer_Destroy(&OutFile);
-		SampleBuffer_Destroy(&InFile);
-		return -1;
-	}
-
-	//! Init state (and re-align data to freeze point)
-	struct Spectrice_t State = {
-		.nChan        = nChan,
-		.BlockSize    = BlockSize,
-		.nHops        = nHops,
-		.FreezeStart  = FreezeStart + InputPrePad,
-		.FreezePoint  = FreezePoint + InputPrePad,
-		.FreezeFactor = FreezeFactor,
-		.FreezeAmp    = FreezeAmp,
-		.FreezePhase  = FreezePhase,
-	};
-	if(!Spectrice_Init(&State, WindowType)) {
-		printf("ERROR: Unable to initialize state\n");
-		SampleBuffer_Destroy(&OutFile);
-		SampleBuffer_Destroy(&InFile);
-		return -1;
-	}
-
-	//! Get number of samples+blocks to process
-	int nSamples;
-	int nBlocks; {
-		FILE *File = InFile.File;
-		long int Beg = ftell(File); fseek(File,   0, SEEK_END);
-		long int End = ftell(File); fseek(File, Beg, SEEK_SET);
-		nSamples = (End - Beg) / (nChan*sizeof(int16_t)) - OutputPrePad; //! Include pre-padding
-		nBlocks  = (nSamples - 1) / BlockSize + 1;
+	//! Initialize state
+	State.nChan        = FileIn.fmt->nChannels;
+	State.BlockSize    = BlockSize;
+	State.nHops        = nHops;
+	State.FreezeStart  = BlockSize;
+	State.FreezePoint  = BlockSize + FreezePoint - FreezeStart;
+	State.FreezeFactor = FreezeFactor;
+	State.FreezeAmp    = FreezeAmp;
+	State.FreezePhase  = FreezePhase;
+	if(!Spectrice_Init(&State, WindowType, ReadBuffer)) {
+		printf("ERROR: Unable to initialize processor.\n");
+		ExitCode = -1; goto Exit_FailInitSpectrice;
 	}
 
 	//! Begin processing
-	int Block, nSamplesRem = nSamples;
+	int nSamplesRem = FileIn.nSamplePoints - FreezeStart + BlockSize;
+	int Block, nBlocks = (nSamplesRem - 1) / BlockSize + 1;
 	for(Block=0;Block<nBlocks;Block++) {
-		printf("\rBlock %u/%u (%.2f%%)", Block, nBlocks, Block*100.0f/nBlocks);
+		printf("\rBlock %u/%u (%.2f%%)", Block+1, nBlocks, Block*100.0f/nBlocks);
 
-		float *Buf;
-		int nOutSamples = (nSamplesRem < BlockSize) ? nSamplesRem : BlockSize;
-		Buf = SampleBuffer_Fetch(&InFile, BlockSize*nChan);
-		if(nChan == 2) SampleBuffer_Deinterleave(Buf, InterleaveBuffer, BlockSize*2);
-		Spectrice_Process(&State, ProcessBuffer, Buf);
-		Buf = ProcessBuffer;
-		if(nChan == 2) SampleBuffer_Interleave(Buf, InterleaveBuffer, BlockSize*2);
-		SampleBuffer_Write(&OutFile, nOutSamples*nChan, Buf);
-		nSamplesRem -= nOutSamples;
+		int nOutputSmp = nSamplesRem;
+		if(nOutputSmp > BlockSize) nOutputSmp = BlockSize;
+		nSamplesRem -= nOutputSmp;
+
+		WAV_ReadAsFloat(&FileIn, ReadBuffer, BlockSize);
+		Spectrice_Process(&State, OutBuffer, ReadBuffer);
+		WAV_WriteFromFloat(&FileOut, OutBuffer, nOutputSmp);
 	}
 	printf("\nOk.");
 
-	//! Destroy state, normal return
-	Spectrice_Destroy(&State);
-	SampleBuffer_WriteFlush(&OutFile);
-	SampleBuffer_Destroy(&OutFile);
-	SampleBuffer_Destroy(&InFile);
-	return 0;
+	//! Exit points
+Exit_FailInitSpectrice:
+	free(AllocBuffer);
+Exit_FailCreateAllocBuffer:
+	{
+		//! Save pointer to chunks data and close file
+		struct WAV_Chunk_t *Ck = FileOut.Chunks;
+		WAV_Close(&FileOut);
+
+		//! Delete output file chunks
+		while(Ck) {
+			struct WAV_Chunk_t *Next = Ck->Next;
+			free(Ck);
+			Ck = Next;
+		}
+	}
+Exit_FailCreateOutFile:
+	WAV_Close(&FileIn);
+Exit_FailOpenInFile:
+Exit_BadArgs:
+	return ExitCode;
 }
 
 /**************************************/
