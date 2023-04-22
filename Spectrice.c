@@ -50,11 +50,17 @@ int main(int argc, const char *argv[]) {
 			" -freezepoint:X  - Set freezing point. If this is not aligned to BlockSize, the\n"
 			"                   data will be padded so that it is and then shifted back on\n"
 			"                   output.\n"
+			"                   If this parameter is not provided, then the freeze point will\n"
+			"                   become the waveform's loop start point (and if no loop is\n"
+			"                   found, the application will exit with an error).\n"
 			" -freezefactor:1.0 - Amount of freezing to apply. 0.0 = No change, 1.0 = Freeze.\n"
 			" -nofreezeamp      - Don't freeze amplitude.\n"
 			" -freezephase      - Freeze phase step.\n"
 			" -format:default   - Set output format (default, PCM8, PCM16, PCM24, FLOAT32).\n"
 			"                     `default` will use the same format as the input file.\n"
+			" -loops:y          - Enable(y) or disable(n) loop handling. When enabled, any\n"
+			"                     data past the loop end point will \"wrap around\" back to\n"
+			"                     the loop start point.\n"
 		);
 		return 1;
 	}
@@ -67,6 +73,9 @@ int main(int argc, const char *argv[]) {
 	int   WindowType   = SPECTRICE_WINDOW_TYPE_NUTTALL;
 	int   FreezeXFade  = 0;
 	int   FreezePoint  = 0;
+	int   LoopEnd      = 0;
+	int   LoopLen      = 0;
+	int   LoopProcess  = 1;
 	float FreezeFactor = 1.0f;
 	int   FormatType   = FORMAT_DEFAULT;
 	{
@@ -120,6 +129,13 @@ int main(int argc, const char *argv[]) {
 				FreezePhase = 1;
 			}
 
+			else if(!memcmp(argv[n], "-loops:", 7)) {
+				char x = argv[n][7];
+				     if(x == 'y' || x == 'Y') LoopProcess = 1;
+				else if(x == 'n' || x == 'N') LoopProcess = 0;
+				else printf("WARNING: Ignoring invalid parameter to loop processing (%c)\n", x);
+			}
+
 			else if(!memcmp(argv[n], "-format:", 8)) {
 				const char *FmtStr = argv[n] + 8;
 				     if(!strcmp(FmtStr, "PCM8")    || !strcmp(FmtStr, "pcm8"))
@@ -141,14 +157,6 @@ int main(int argc, const char *argv[]) {
 			else printf("WARNING: Ignoring unknown argument (%s)\n", argv[n]);
 		}
 	}
-	int FreezeStart = FreezePoint - FreezeXFade;
-
-	//! Verify that FreezeStart occurs after at least one block of data
-	if(FreezeStart < BlockSize) {
-		printf("WARNING: Freeze start point too early; moving to %d.\n", BlockSize);
-		FreezeStart = BlockSize;
-		if(FreezePoint < FreezeStart) FreezePoint = FreezeStart;
-	}
 
 	//! Open input file
 	{
@@ -157,6 +165,56 @@ int main(int argc, const char *argv[]) {
 			printf("ERROR: Unable to open input file (%s); error %s.\n", argv[1], WAV_ErrorCodeToString(Error));
 			ExitCode = -1; goto Exit_FailOpenInFile;
 		}
+	}
+
+	//! Read loop points
+	{
+		//! Find a smpl chunk
+		const struct WAV_Chunk_t *Ck = FileIn.Chunks;
+		while(Ck) {
+			if(Ck->CkType == RIFF_FOURCC("smpl")) {
+				struct WAVE_smpl_t *CkData = malloc(Ck->CkSize);
+				if(CkData) {
+					fseek(FileIn.File, Ck->FileOffs, SEEK_SET);
+					fread(CkData, Ck->CkSize, 1, FileIn.File);
+
+					//! Now find the first loop point and assign
+					uint32_t i;
+					for(i=0;i<CkData->cSampleLoops;i++) {
+						struct WAVE_smpl_loop_t *CkLoop = &CkData->loopPoints[i];
+						if(CkLoop->dwType == WAVE_SMPL_LOOP_TYPE_FOWARD) {
+							//! dwEnd is inclusive, but we need exclusive, so add 1
+							LoopEnd = CkLoop->dwEnd+1;
+							LoopLen = LoopEnd - CkLoop->dwStart;
+							break;
+						}
+					}
+					free(CkData);
+				}
+				break;
+			} else Ck = Ck->Next;
+		}
+
+		//! If we have no loops, disable loop processing
+		if(!LoopLen) LoopProcess = 0;
+	}
+
+	//! If we don't have a freeze point, set it now
+	if(FreezePoint == 0) {
+		if(LoopLen) {
+			FreezePoint = LoopEnd - LoopLen;
+		} else {
+			printf("ERROR: Unable to find freeze point.\n");
+			ExitCode = -1; goto Exit_FailGetFreezePoint;
+		}
+	}
+	int FreezeStart = FreezePoint - FreezeXFade;
+
+	//! Verify that FreezeStart occurs after at least one block of data
+	if(FreezeStart < BlockSize) {
+		printf("WARNING: Freeze start point too early; moving to %d.\n", BlockSize);
+		FreezeStart = BlockSize;
+		if(FreezePoint < FreezeStart) FreezePoint = FreezeStart;
 	}
 
 	//! Create output file
@@ -232,6 +290,7 @@ int main(int argc, const char *argv[]) {
 			WAV_WriteFromFloat(&FileOut, ReadBuffer, N);
 		}
 		WAV_ReadAsFloat(&FileIn, ReadBuffer, BlockSize);
+		LoopEnd -= FreezeStart;
 	}
 
 	//! Initialize state
@@ -250,6 +309,7 @@ int main(int argc, const char *argv[]) {
 
 	//! Begin processing
 	int nSamplesRem = FileIn.nSamplePoints - FreezeStart + BlockSize;
+	int nLoopSamplesRem = LoopEnd;
 	int Block, nBlocks = (nSamplesRem - 1) / BlockSize + 1;
 	for(Block=0;Block<nBlocks;Block++) {
 		printf("\rBlock %u/%u (%.2f%%)", Block+1, nBlocks, Block*100.0f/nBlocks);
@@ -258,7 +318,25 @@ int main(int argc, const char *argv[]) {
 		if(nOutputSmp > BlockSize) nOutputSmp = BlockSize;
 		nSamplesRem -= nOutputSmp;
 
-		WAV_ReadAsFloat(&FileIn, ReadBuffer, BlockSize);
+		//! Make sure to wrap around at the loop point
+		int nReadSmpRem = nOutputSmp;
+		float *NextDst = ReadBuffer;
+		for(;;) {
+			if(LoopProcess && !nLoopSamplesRem) {
+				//! Rewind to loop start
+				FileIn.SamplePosition -= LoopLen;
+				nLoopSamplesRem       += LoopLen;
+			}
+
+			int nSmpThisRun = nReadSmpRem;
+			if(LoopProcess && nSmpThisRun > nLoopSamplesRem) nSmpThisRun = nLoopSamplesRem;
+			WAV_ReadAsFloat(&FileIn, NextDst, nSmpThisRun);
+
+			nReadSmpRem     -= nSmpThisRun;
+			nLoopSamplesRem -= nSmpThisRun;
+			NextDst         += nSmpThisRun * FileIn.fmt->nChannels;
+			if(!nReadSmpRem) break;
+		}
 		Spectrice_Process(&State, OutBuffer, ReadBuffer);
 		WAV_WriteFromFloat(&FileOut, OutBuffer, nOutputSmp);
 	}
@@ -281,6 +359,7 @@ Exit_FailCreateAllocBuffer:
 		}
 	}
 Exit_FailCreateOutFile:
+Exit_FailGetFreezePoint:
 	WAV_Close(&FileIn);
 Exit_FailOpenInFile:
 Exit_BadArgs:
