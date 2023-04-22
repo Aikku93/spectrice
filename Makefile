@@ -35,7 +35,7 @@ LD := $(ARCHCROSS)gcc
 SRC := $(foreach dir, $(SRCDIR), $(wildcard $(dir)/*.c))
 OBJ := $(addprefix $(OBJDIR)/, $(SRC:.c=.o))
 DEP := $(addsuffix .d, $(OBJ))
-EXE := spectrice.exe # Change this for other platforms
+EXE := spectrice
 
 #----------------------------#
 # General rules
@@ -53,7 +53,7 @@ $(OBJDIR)/%.o : %.c
 all : $(EXE)
 
 $(EXE) : $(OBJ) | $(RELDIR)
-	$(LD) -o $(RELDIR)/$@ $^ $(LDFLAGS)
+	$(LD) -s -o $(RELDIR)/$@ $^ $(LDFLAGS)
 
 $(OBJ) : $(SRC) | $(OBJDIR)
 
