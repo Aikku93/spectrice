@@ -29,6 +29,31 @@ struct WAVE_fmt_t {
 
 /**************************************/
 
+//! WAVE -> smpl
+#define WAVE_SMPL_LOOP_TYPE_FOWARD 0x00000000
+struct WAVE_smpl_loop_t {
+	uint32_t dwIdentifier;
+	uint32_t dwType;
+	uint32_t dwStart;
+	uint32_t dwEnd;
+	uint32_t dwFraction;
+	uint32_t dwPlayCount;
+};
+struct WAVE_smpl_t {
+	uint32_t dwManufacturer;
+	uint32_t dwProduct;
+	uint32_t dwSamplePeriod;
+	uint32_t dwMIDIUnityNote;
+	uint32_t dwMIDIPitchFraction;
+	uint32_t dwSMPTEFormat;
+	uint32_t dwSMPTEOffset;
+	uint32_t cSampleLoops;
+	uint32_t cbSamplerData;
+	struct WAVE_smpl_loop_t loopPoints[];
+};
+
+/**************************************/
+
 //! WAV chunk descriptor type
 struct WAV_Chunk_t {
 	uint32_t CkType;
