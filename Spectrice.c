@@ -31,13 +31,13 @@ int main(int argc, const char *argv[]) {
 	struct Spectrice_t State;
 
 	//! Check arguments
-	if(argc < 4) {
+	if(argc < 3) {
 		printf(
 			"spectrice - Spectral Freezing Tool\n"
 			"Usage:\n"
 			" spectrice Input.wav Output.wav [Opt]\n"
 			"Options:\n"
-			" -blocksize:8192 - Set number of coefficients per block (must be a power of 2).\n"
+			" -blocksize:1024 - Set number of coefficients per block (must be a power of 2).\n"
 			" -nhops:8        - Set number of evenly-divided hops per block (must be 2^n).\n"
 			" -window:nuttall - Set the window function. Possible values:\n"
 			"                   - sine     (minimum hops: 2)\n"
@@ -56,6 +56,10 @@ int main(int argc, const char *argv[]) {
 			" -freezefactor:1.0 - Amount of freezing to apply. 0.0 = No change, 1.0 = Freeze.\n"
 			" -nofreezeamp      - Don't freeze amplitude.\n"
 			" -freezephase      - Freeze phase step.\n"
+			" -snapshot:n       - Capture a snapshot of the amplitude at some arbitrary\n"
+			"                     position, and use this for blending with cross-fading.\n"
+			"                     Can be 'n' to disable this feature, or a sample position\n"
+			"                     from which to capture the snapshot.\n"
 			" -format:default   - Set output format (default, PCM8, PCM16, PCM24, FLOAT32).\n"
 			"                     `default` will use the same format as the input file.\n"
 			" -loops:y          - Enable(y) or disable(n) loop handling. When enabled, any\n"
@@ -66,13 +70,14 @@ int main(int argc, const char *argv[]) {
 	}
 
 	//! Parse parameters
-	int   BlockSize    = 8192;
+	int   BlockSize    = 1024;
 	int   nHops        = 8;
 	int   FreezeAmp    = 1;
 	int   FreezePhase  = 0;
 	int   WindowType   = SPECTRICE_WINDOW_TYPE_NUTTALL;
 	int   FreezeXFade  = 0;
 	int   FreezePoint  = 0;
+	int   SnapshotPos  = -1;
 	int   LoopEnd      = 0;
 	int   LoopLen      = 0;
 	int   LoopProcess  = 1;
@@ -129,6 +134,12 @@ int main(int argc, const char *argv[]) {
 				FreezePhase = 1;
 			}
 
+			else if(!memcmp(argv[n], "-snapshot:", 10)) {
+				char x = argv[n][10];
+				if(x == 'n' || x == 'N') SnapshotPos = -1;
+				else SnapshotPos = atoi(argv[n] + 10);
+			}
+
 			else if(!memcmp(argv[n], "-loops:", 7)) {
 				char x = argv[n][7];
 				     if(x == 'y' || x == 'Y') LoopProcess = 1;
@@ -165,6 +176,18 @@ int main(int argc, const char *argv[]) {
 			printf("ERROR: Unable to open input file (%s); error %s.\n", argv[1], WAV_ErrorCodeToString(Error));
 			ExitCode = -1; goto Exit_FailOpenInFile;
 		}
+	}
+
+	//! Ensure file is at last as long the block size
+	if((int)FileIn.nSamplePoints < BlockSize) {
+		printf("ERROR: Input file has less sample points than BlockSize.\n");
+		ExitCode = -1; goto Exit_FailFileLength;
+	}
+
+	//! Ensure snapshot position is valid
+	if(SnapshotPos >= 0 && SnapshotPos >= (int)FileIn.nSamplePoints - BlockSize) {
+		printf("WARNING: Snapshot position too close to end of file; moving to last block.\n");
+		SnapshotPos = FileIn.nSamplePoints - BlockSize;
 	}
 
 	//! Read loop points
@@ -211,9 +234,11 @@ int main(int argc, const char *argv[]) {
 	int FreezeStart = FreezePoint - FreezeXFade;
 
 	//! Verify that FreezeStart occurs after at least one block of data
-	if(FreezeStart < BlockSize) {
-		printf("WARNING: Freeze start point too early; moving to %d.\n", BlockSize);
-		FreezeStart = BlockSize;
+	//! NOTE: Further shift by BlockSize/2 to account for OLA structure.
+	int XformPrimingLength = BlockSize + BlockSize/2;
+	if(FreezeStart < XformPrimingLength) {
+		printf("WARNING: Freeze start point too early; moving to %d.\n", XformPrimingLength);
+		FreezeStart = XformPrimingLength;
 		if(FreezePoint < FreezeStart) FreezePoint = FreezeStart;
 	}
 
@@ -281,7 +306,7 @@ int main(int argc, const char *argv[]) {
 	//! samples directly until one block before the freeze start point; we
 	//! then use this block to prime the processor.
 	{
-		int nSmpRem = FreezeStart - BlockSize;
+		int nSmpRem = FreezeStart - XformPrimingLength;
 		while(nSmpRem) {
 			int N = nSmpRem;
 			if(N > BlockSize) N = BlockSize;
@@ -293,6 +318,14 @@ int main(int argc, const char *argv[]) {
 		LoopEnd -= FreezeStart;
 	}
 
+	//! If we need to capture a snapshot, do so now and put it in OutBuffer
+	if(SnapshotPos >= 0) {
+		uint32_t OldPos = FileIn.SamplePosition;
+		FileIn.SamplePosition = SnapshotPos;
+		WAV_ReadAsFloat(&FileIn, OutBuffer, BlockSize);
+		FileIn.SamplePosition = OldPos;
+	}
+
 	//! Initialize state
 	State.nChan        = FileIn.fmt->nChannels;
 	State.BlockSize    = BlockSize;
@@ -302,7 +335,7 @@ int main(int argc, const char *argv[]) {
 	State.FreezeFactor = FreezeFactor;
 	State.FreezeAmp    = FreezeAmp;
 	State.FreezePhase  = FreezePhase;
-	if(!Spectrice_Init(&State, WindowType, ReadBuffer)) {
+	if(!Spectrice_Init(&State, WindowType, ReadBuffer, (SnapshotPos >= 0) ? OutBuffer : NULL)) {
 		printf("ERROR: Unable to initialize processor.\n");
 		ExitCode = -1; goto Exit_FailInitSpectrice;
 	}
@@ -360,6 +393,7 @@ Exit_FailCreateAllocBuffer:
 	}
 Exit_FailCreateOutFile:
 Exit_FailGetFreezePoint:
+Exit_FailFileLength:
 	WAV_Close(&FileIn);
 Exit_FailOpenInFile:
 Exit_BadArgs:
