@@ -69,7 +69,8 @@ void Spectrice_Process(struct Spectrice_t *State, float *Output, const float *In
 
 				//! Freeze amplitude
 				if(State->FreezeAmp) {
-					Abs = BfAbs[n] = MixRatio*BfAbs[n] + (1.0f-MixRatio)*Abs;
+					Abs = MixRatio*BfAbs[n] + (1.0f-MixRatio)*Abs;
+					if(!State->HaveSnapshot) BfAbs[n] = Abs;
 				}
 
 				//! Freeze phase step

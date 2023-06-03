@@ -99,13 +99,15 @@ static int InitXformWindow(float *w, int N, int nHops, int Type) {
 
 /**************************************/
 
-int Spectrice_Init(struct Spectrice_t *State, int WindowType, const float *PrimingInput) {
+int Spectrice_Init(struct Spectrice_t *State, int WindowType, const float *PrimingInput, const float *FreezeSnapshot) {
 	int n;
 
 	//! Clear anything that is needed for EncoderState_Destroy()
 	State->BufferData = NULL;
 
 	//! Verify parameters
+	//! NOTE: We can't combine FreezePhase with a snapshot. It's technically
+	//! possible to do so, but this will be left for a future update.
 	int nChan      = State->nChan;
 	int BlockSize  = State->BlockSize;
 	int nHops      = State->nHops;
@@ -113,6 +115,7 @@ int Spectrice_Init(struct Spectrice_t *State, int WindowType, const float *Primi
 	if(BlockSize < MIN_BANDS || BlockSize > MAX_BANDS) return 0;
 	if(nHops     < 2         || nHops     > BlockSize) return 0;
 	if(!SPECTRICE_IS_POWEROF_2(BlockSize) || !SPECTRICE_IS_POWEROF_2(nHops)) return 0;
+	if(FreezeSnapshot && State->FreezePhase) return 0;
 
 	//! Get buffer offsets and allocation size
 	int AllocSize = 0;
@@ -148,11 +151,36 @@ int Spectrice_Init(struct Spectrice_t *State, int WindowType, const float *Primi
 		Spectrice_Destroy(State);
 		return 0;
 	}
-	for(n=0;n<(BlockSize/2)*nChan;n++) State->BfAbs   [n] = 0.0f;
 	if(State->FreezePhase) {
 		for(n=0;n<(BlockSize/2)*nChan;n++) State->BfArg    [n] = 0.0f;
 		for(n=0;n<(BlockSize/2)*nChan;n++) State->BfArgOld [n] = 0.0f;
 		for(n=0;n<(BlockSize/2)*nChan;n++) State->BfArgStep[n] = 0.0f;
+	}
+
+	//! Transform the "snapshot" window for freezing
+	if(FreezeSnapshot) {
+		int Chan;
+		float *BfAbs = State->BfAbs;
+		float *BfDFT = State->BfTemp;
+		const float *Window = State->Window;
+		for(Chan=0;Chan<nChan;Chan++) {
+			for(n=0;n<BlockSize/2;n++) {
+				BfDFT[            n] = Window[n] * FreezeSnapshot[(            n)*nChan + Chan];
+				BfDFT[BlockSize-1-n] = Window[n] * FreezeSnapshot[(BlockSize-1-n)*nChan + Chan];
+			}
+			Fourier_FFTReCenter(BfDFT, BfDFT+BlockSize, BlockSize);
+			for(n=0;n<BlockSize/2;n++) {
+				float Re  = BfDFT[n*2+0];
+				float Im  = BfDFT[n*2+1];
+				float Abs = sqrtf(SQR(Re) + SQR(Im));
+				BfAbs[n] = Abs;
+			}
+			BfAbs += BlockSize/2;
+		}
+		State->HaveSnapshot = 1;
+	} else {
+		float *BfAbs = State->BfAbs;
+		for(n=0;n<(BlockSize/2)*nChan;n++) BfAbs[n] = 0.0f;
 	}
 
 	//! Prime input buffer

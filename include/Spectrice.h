@@ -26,6 +26,7 @@ struct Spectrice_t {
 	float FreezeFactor; //! Freezing amount (0.0 = No freezing, 1.0 = Full freeze)
 	int   FreezeAmp;    //! Freeze amplitude  (0 = False, 1 = True)
 	int   FreezePhase;  //! Freeze phase step (0 = False, 1 = True)
+	int   HaveSnapshot; //! 0 = BfAbs contains last block's data, 1 = BfAbs contains a snapshot
 
 	//! Internal state
 	//! Buffer memory layout (excluding alignment padding):
@@ -53,7 +54,7 @@ struct Spectrice_t {
 
 /**************************************/
 
-int  Spectrice_Init   (struct Spectrice_t *State, int WindowType, const float *PrimingInput);
+int  Spectrice_Init   (struct Spectrice_t *State, int WindowType, const float *PrimingInput, const float *FreezeSnapshot);
 void Spectrice_Destroy(struct Spectrice_t *State);
 void Spectrice_Process(struct Spectrice_t *State, float *Output, const float *Input);
 
