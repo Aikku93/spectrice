@@ -21,6 +21,17 @@
 #define FORMAT_FLOAT32 3
 #define FORMAT_DEFAULT 4
 
+/************************************************/
+
+//! Read gain in linear form, or dB form
+static double ReadGain(const char *Str) {
+	double Gain;
+	int IsDecibel = 0;
+	int nArg = sscanf(Str, "%lf %*1[dD]%*1[bB]%n", &Gain, &IsDecibel);
+	if(nArg == 0) return NAN;
+	return IsDecibel ? pow(10.0, Gain/20.0) : Gain;
+}
+
 /**************************************/
 
 int main(int argc, const char *argv[]) {
@@ -60,6 +71,8 @@ int main(int argc, const char *argv[]) {
 			"                     position, and use this for blending with cross-fading.\n"
 			"                     Can be 'n' to disable this feature, or a sample position\n"
 			"                     from which to capture the snapshot.\n"
+			" -snapshotgain:1.0 - Set gain of snapshot. Can be specified in linear form, or\n"
+			"                     in dB (eg. 1.0 == 0.0dB).\n"
 			" -format:default   - Set output format (default, PCM8, PCM16, PCM24, FLOAT32).\n"
 			"                     `default` will use the same format as the input file.\n"
 			" -loops:y          - Enable(y) or disable(n) loop handling. When enabled, any\n"
@@ -78,6 +91,7 @@ int main(int argc, const char *argv[]) {
 	int   FreezeXFade  = 0;
 	int   FreezePoint  = 0;
 	int   SnapshotPos  = -1;
+	float SnapshotGain = 1.0f;
 	int   LoopEnd      = 0;
 	int   LoopLen      = 0;
 	int   LoopProcess  = 1;
@@ -138,6 +152,13 @@ int main(int argc, const char *argv[]) {
 				char x = argv[n][10];
 				if(x == 'n' || x == 'N') SnapshotPos = -1;
 				else SnapshotPos = atoi(argv[n] + 10);
+			}
+
+			else if(!memcmp(argv[n], "-snapshotgain:", 14)) {
+				const char *Str = argv[n] + 14;
+				double x = ReadGain(Str);
+				if(x == NAN) printf("WARNING: Ignoring invalid parameter to snapshot gain (%s)\n", Str);
+				else SnapshotGain = (float)x;
 			}
 
 			else if(!memcmp(argv[n], "-loops:", 7)) {
@@ -324,6 +345,12 @@ int main(int argc, const char *argv[]) {
 		FileIn.SamplePosition = SnapshotPos;
 		WAV_ReadAsFloat(&FileIn, OutBuffer, BlockSize);
 		FileIn.SamplePosition = OldPos;
+
+		//! Apply gain
+		int n;
+		if(SnapshotGain != 1.0f) {
+			for(n=0;n<BlockSize*FileIn.fmt->nChannels;n++) OutBuffer[n] *= SnapshotGain;
+		}
 	}
 
 	//! Initialize state
