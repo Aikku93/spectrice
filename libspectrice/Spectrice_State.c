@@ -181,6 +181,7 @@ int Spectrice_Init(struct Spectrice_t *State, int WindowType, const float *Primi
 	} else {
 		float *BfAbs = State->BfAbs;
 		for(n=0;n<(BlockSize/2)*nChan;n++) BfAbs[n] = 0.0f;
+		State->HaveSnapshot = 0;
 	}
 
 	//! Prime input buffer
