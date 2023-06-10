@@ -368,7 +368,7 @@ int main(int argc, const char *argv[]) {
 	}
 
 	//! Begin processing
-	int nSamplesRem = FileIn.nSamplePoints - FreezeStart + BlockSize;
+	int nSamplesRem = FileIn.nSamplePoints - FreezeStart + XformPrimingLength;
 	int nLoopSamplesRem = LoopEnd;
 	int Block, nBlocks = (nSamplesRem - 1) / BlockSize + 1;
 	for(Block=0;Block<nBlocks;Block++) {
@@ -396,6 +396,11 @@ int main(int argc, const char *argv[]) {
 			nLoopSamplesRem -= nSmpThisRun;
 			NextDst         += nSmpThisRun * FileIn.fmt->nChannels;
 			if(!nReadSmpRem) break;
+		}
+		{
+			//! Clear end of buffer if needed
+			int n, N = BlockSize - nOutputSmp;
+			for(n=0;n<N*FileIn.fmt->nChannels;n++) *NextDst++ = 0.0f;
 		}
 		Spectrice_Process(&State, OutBuffer, ReadBuffer);
 		WAV_WriteFromFloat(&FileOut, OutBuffer, nOutputSmp);
