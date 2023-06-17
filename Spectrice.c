@@ -336,7 +336,7 @@ int main(int argc, const char *argv[]) {
 			WAV_WriteFromFloat(&FileOut, ReadBuffer, N);
 		}
 		WAV_ReadAsFloat(&FileIn, ReadBuffer, BlockSize);
-		LoopEnd -= FreezeStart;
+		LoopEnd -= FreezeStart - XformPrimingLength + BlockSize;
 	}
 
 	//! If we need to capture a snapshot, do so now and put it in OutBuffer
